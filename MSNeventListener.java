@@ -37,13 +37,14 @@ import java.util.HashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 
 /**
  * The MSNeventListener class intercepts application messages sent to the MSN messenger status integration by
  * disguising a hidden native window as the MSN window class.
  *
  * @author Andreas "Nekres" Gärtner
- * @version 05.02.2017 00:00
+ * @version 05.02.2017 11:57
  */
 public class MSNeventListener {
 
@@ -51,8 +52,10 @@ public class MSNeventListener {
     public static int GWL_WNDPROC;
     public static String lpClassName;
     public static ScheduledExecutorService msnListener;
-    public static String _msnString;
-    
+    public static String[] _msnArray;
+    public static ScheduledExecutorService forwardNewMsnMessage;
+    public static ScheduledFuture<?> _msnMessageChange;
+
     /**
      * Constructor for objects of class MSNeventListener
      */
@@ -62,15 +65,16 @@ public class MSNeventListener {
         GWL_WNDPROC = -4;
         lpClassName = "MsnMsgrUIManager";
         msnListener = Executors.newScheduledThreadPool(5);
+        forwardNewMsnMessage = Executors.newScheduledThreadPool(4);
     }
-    
+
     /**
-     * The method start creates and executes a runnable MsnMessagePump object in a scheduled interval.
+     * The method start executes the runnable MsnMessagePump and keeps it running.
      * @throws Exception
      */
     public void start() {
         try {
-            msnListener.scheduleAtFixedRate(new MsnMessagePump(), 0, 5, TimeUnit.SECONDS);
+            msnListener.scheduleAtFixedRate(MsnMessagePump, 0, 500, TimeUnit.MILLISECONDS);
         } catch(Exception ex) {
             ex.printStackTrace();
         }
@@ -107,18 +111,21 @@ public class MSNeventListener {
     }
 
     /**
-     * The runnable MsnMessagePump class handles the messages normally received by the MSN messenger.
+     * The runnable MsnMessagePump handles the messages normally received by the MSN messenger.
      */
-    public class MsnMessagePump implements Runnable {
+    public Runnable MsnMessagePump = new Runnable() {
+        @Override
         public void run() {
             WNDCLASSEX msnWndClass = new WNDCLASSEX();
             msnWndClass.lpszClassName = lpClassName;
             msnWndClass.lpfnWndProc = WNDPROC;
             if (MyUser32.INSTANCE.RegisterClassEx(msnWndClass).intValue() > 0) {
-                // Create a native window
+
+                /* Create a native window */
                 HWND hMsnWnd = MyUser32.INSTANCE.CreateWindowEx(0, lpClassName, "", 0,
                             0, 0, 0, 0, null, null, null, null);
-                // Register the callback
+
+                /* Register the callback */
                 try {
                     // Use SetWindowLongPtr if available (64-bit safe)
                     MyUser32.INSTANCE.SetWindowLongPtr(hMsnWnd, GWL_WNDPROC, WNDPROC);
@@ -126,7 +133,8 @@ public class MSNeventListener {
                     // Use SetWindowLong if SetWindowLongPtr isn't available
                     MyUser32.INSTANCE.SetWindowLong(hMsnWnd, GWL_WNDPROC, WNDPROC);
                 }
-                // Handle events until the window is destroyed
+
+                /* Handle events until the window is destroyed */
                 MSG msg = new MSG();
                 msg.clear();
                 while(MyUser32.INSTANCE.GetMessage(msg, hMsnWnd, 0, 0) > 0) {
@@ -135,8 +143,23 @@ public class MSNeventListener {
                 }
             }
         }
-    }
-
+    };
+    
+    /**
+     * The runnable OnMSNStringChanged encrypts and returns received message data.
+     */
+    public Runnable OnMSNStringChanged = new Runnable() {
+  
+        @Override
+        public void run() {
+            if (_msnArray) {
+				/*
+				 * Do stuff with the message data in msnArray here.
+				 * Ex. label and put values into a new HashMap.
+				 */
+            }
+        }
+    };
     /**
      * The window procedure WNDPROC overrides the default callback method with a customized one.
      * @returns LRESULT
@@ -146,18 +169,24 @@ public class MSNeventListener {
         public LRESULT callback(HWND hWnd, int uMsg, WPARAM wParam, LPARAM lParam)
         {
             if (uMsg == WM_COPYDATA) {
+
                 COPYDATASTRUCT copydatastruct = new COPYDATASTRUCT(new Pointer(lParam.longValue()));
-                String str = copydatastruct.lpData.getWideString(0);
-                if (str.equals(_msnString)) { return new LRESULT(0); }; // Check if dublicate.
-                _msnString = str;
-                String[] sourceArray = str.split("\\\\0"); // Split message data at zero bytes.
-                /*
-                 * Do stuff with the message data in sourceArray. 
-                 * E.x putting the data into a HashMap.
-                 */
-            };
+
+                /* Split message data at zero bytes. */
+                String[] arr = copydatastruct.lpData.getWideString(0).split("\\\\0");
+                
+                /* End the process if the message data is a duplicate of the previous. */ 
+                if (Arrays.deepEquals(arr, _msnArray)) { return new LRESULT(0); };
+                _msnArray = arr;
+
+                /* Anti-spam: cancel previous scheduled decrypting processes. */
+                if (_msnMessageChange != null) { _msnMessageChange.cancel(false); }
+
+                /* Schedule the decrypting runnable to forward a new message. */
+                _msnMessageChange = forwardNewMsnMessage.schedule(OnMSNStringChanged, 5, TimeUnit.SECONDS);
+            }
             return new LRESULT(MyUser32.INSTANCE.DefWindowProc(hWnd, uMsg, wParam, lParam).intValue());
-        };
+        }
 
     };
 }
