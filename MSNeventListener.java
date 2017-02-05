@@ -34,34 +34,43 @@ import com.sun.jna.Structure;
 import java.util.Arrays;
 import java.util.List;
 import java.util.HashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * The MSNeventListener class intercepts application messages sent to the MSN messenger status integration by
  * disguising a hidden native window as the MSN window class.
  *
  * @author Andreas "Nekres" Gärtner
- * @version 04.02.2017 00:45
+ * @version 05.02.2017 00:00
  */
 public class MSNeventListener {
 
-    public static final int WM_COPYDATA = 0x004A;
-    public static final int GWL_WNDPROC = -4;
-    public static final String lpClassName = "MsnMsgrUIManager";
-    public static final Object msnWndHandle = new Object();
-    public static Thread msnListener;
-    public static MyUser32 lib;
+    public static int WM_COPYDATA;
+    public static int GWL_WNDPROC;
+    public static String lpClassName;
+    public static ScheduledExecutorService msnListener;
     public static String _msnString;
     
     /**
      * Constructor for objects of class MSNeventListener
-     * @throws Exception
      */
     public MSNeventListener()
     { 
-    	msnListener = new Thread(new MsnMessagePump());
+        WM_COPYDATA = 0x004A;
+        GWL_WNDPROC = -4;
+        lpClassName = "MsnMsgrUIManager";
+        msnListener = Executors.newScheduledThreadPool(5);
+    }
+    
+    /**
+     * The method start creates and executes a runnable MsnMessagePump object in a scheduled interval.
+     * @throws Exception
+     */
+    public void start() {
         try {
-            msnListener.start();
-            msnListener.join();
+            msnListener.scheduleAtFixedRate(new MsnMessagePump(), 0, 5, TimeUnit.SECONDS);
         } catch(Exception ex) {
             ex.printStackTrace();
         }
@@ -72,10 +81,10 @@ public class MSNeventListener {
      * user32 library to accept Callback as third parameter.
      */
     public interface MyUser32 extends User32 {
-		public final MyUser32 lib = (MyUser32) Native.loadLibrary("user32", MyUser32.class, W32APIOptions.UNICODE_OPTIONS);
+        public final MyUser32 INSTANCE = (MyUser32) Native.loadLibrary("user32", MyUser32.class, W32APIOptions.UNICODE_OPTIONS);
 
-		long SetWindowLongPtr(HWND hWnd, int nIndex, Callback callback);
-		long SetWindowLong(HWND hWnd, int nIndex, Callback callback);
+        long SetWindowLongPtr(HWND hWnd, int nIndex, Callback callback);
+        long SetWindowLong(HWND hWnd, int nIndex, Callback callback);
     }
     
     /**
@@ -89,7 +98,7 @@ public class MSNeventListener {
         }
 
         public int dwData;
-        public int cbData;
+        public long cbData;
         public Pointer lpData;
 
         protected List<String> getFieldOrder() {
@@ -99,44 +108,41 @@ public class MSNeventListener {
 
     /**
      * The runnable MsnMessagePump class handles the messages normally received by the MSN messenger.
-     * @throws UnsatisfiedLinkError
      */
     public class MsnMessagePump implements Runnable {
-    	public void run() { 
-    		synchronized(msnWndHandle) {
-    			WNDCLASSEX msnWndClass = new WNDCLASSEX();
-    			msnWndClass.lpszClassName = lpClassName;
-    			msnWndClass.lpfnWndProc = WNDPROC;
-    			if (lib.RegisterClassEx(msnWndClass).intValue() > 0) {
-    				// Create a native window
-    				HWND hMsnWnd = lib.CreateWindowEx(0, lpClassName, "", 0,
-    							0, 0, 0, 0, null, null, null, null);
-    				// Register the callback
-    				try {
-    					// Use SetWindowLongPtr if available (64-bit safe)
-    					lib.SetWindowLongPtr(hMsnWnd, GWL_WNDPROC, WNDPROC);
-    				} catch(UnsatisfiedLinkError e) {
-    					// Use SetWindowLong if SetWindowLongPtr isn't available
-    					lib.SetWindowLong(hMsnWnd, GWL_WNDPROC, WNDPROC);
-    				}
-    				// Handle events until the window is destroyed
-    				MSG msg = new MSG();
-    				msg.clear();
-    				while(lib.GetMessage(msg, hMsnWnd, 0, 0) > 0) {
-    					lib.TranslateMessage(msg);                                 
-    					lib.DispatchMessage(msg);
-    				}
-    			}
-    		}
-    	}
-	}
-    
+        public void run() {
+            WNDCLASSEX msnWndClass = new WNDCLASSEX();
+            msnWndClass.lpszClassName = lpClassName;
+            msnWndClass.lpfnWndProc = WNDPROC;
+            if (MyUser32.INSTANCE.RegisterClassEx(msnWndClass).intValue() > 0) {
+                // Create a native window
+                HWND hMsnWnd = MyUser32.INSTANCE.CreateWindowEx(0, lpClassName, "", 0,
+                            0, 0, 0, 0, null, null, null, null);
+                // Register the callback
+                try {
+                    // Use SetWindowLongPtr if available (64-bit safe)
+                    MyUser32.INSTANCE.SetWindowLongPtr(hMsnWnd, GWL_WNDPROC, WNDPROC);
+                } catch(UnsatisfiedLinkError e) {
+                    // Use SetWindowLong if SetWindowLongPtr isn't available
+                    MyUser32.INSTANCE.SetWindowLong(hMsnWnd, GWL_WNDPROC, WNDPROC);
+                }
+                // Handle events until the window is destroyed
+                MSG msg = new MSG();
+                msg.clear();
+                while(MyUser32.INSTANCE.GetMessage(msg, hMsnWnd, 0, 0) > 0) {
+                    MyUser32.INSTANCE.TranslateMessage(msg);                                 
+                    MyUser32.INSTANCE.DispatchMessage(msg);
+                }
+            }
+        }
+    }
+
     /**
      * The window procedure WNDPROC overrides the default callback method with a customized one.
      * @returns LRESULT
      */
     WindowProc WNDPROC = new WindowProc() { 
-    	@Override
+        @Override
         public LRESULT callback(HWND hWnd, int uMsg, WPARAM wParam, LPARAM lParam)
         {
             if (uMsg == WM_COPYDATA) {
@@ -147,10 +153,10 @@ public class MSNeventListener {
                 String[] sourceArray = str.split("\\\\0"); // Split message data at zero bytes.
                 /*
                  * Do stuff with the message data in sourceArray. 
-				 * E.x putting the data into a HashMap.
+                 * E.x putting the data into a HashMap.
                  */
             };
-            return new LRESULT(lib.DefWindowProc(hWnd, uMsg, wParam, lParam).intValue());
+            return new LRESULT(MyUser32.INSTANCE.DefWindowProc(hWnd, uMsg, wParam, lParam).intValue());
         };
 
     };
